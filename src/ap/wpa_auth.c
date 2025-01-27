@@ -7,6 +7,10 @@
  */
 
 #include "utils/includes.h"
+#include <sys/types.h> 
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netdb.h>
 
 #include "utils/common.h"
 #include "utils/eloop.h"
@@ -34,6 +38,14 @@
 #include "pmksa_cache_auth.h"
 #include "wpa_auth_i.h"
 #include "wpa_auth_ie.h"
+#include "base64.h" //For Skon
+#include <time.h>
+
+// Skon for wlan bridge
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <fcntl.h>
+
 
 #define STATE_MACHINE_DATA struct wpa_state_machine
 #define STATE_MACHINE_DEBUG_PREFIX "WPA"
@@ -359,7 +371,6 @@ static inline int wpa_auth_start_ampe(struct wpa_authenticator *wpa_auth,
 	return wpa_auth->cb->start_ampe(wpa_auth->cb_ctx, addr);
 }
 #endif /* CONFIG_MESH */
-
 
 static inline int wpa_auth_get_drv_flags(struct wpa_authenticator *wpa_auth,
 					 u64 *drv_flags, u64 *drv_flags2)
@@ -2347,6 +2358,25 @@ int wpa_auth_sm_event(struct wpa_state_machine *sm, enum wpa_event event)
 		sm->DeauthenticationRequest = true;
 		os_memset(sm->PMK, 0, sizeof(sm->PMK));
 		sm->pmk_len = 0;
+		// Skon - log disassociation event
+		time_t mytime = time(NULL);
+		char * time_str = ctime(&mytime);
+		time_str[strlen(time_str)-1] = '\0';
+		// Skon output connection log
+		char filename[]="/tmp/connections.log";
+		FILE *f;
+		f = fopen(filename, "a");
+		fprintf(f,"{\"event\":\"disassoc\",\"time\":\"%s\",\"mac\":\"",time_str);
+		for (int i = 0; i < 6; ++i) {
+		  fprintf(f,"%02X", ((u8*)sm->addr[i]));
+		  if (i<5)
+		    fprintf(f,":");
+		}
+		fprintf(f,"\"}\n");
+	fclose(f);
+
+
+	//printf("SKON DISASSOC!\n");
 #ifdef CONFIG_IEEE80211R_AP
 		os_memset(sm->xxkey, 0, sizeof(sm->xxkey));
 		sm->xxkey_len = 0;
@@ -3666,6 +3696,9 @@ SM_STATE(WPA_PTK, PTKCALCNEGOTIATING)
 	struct wpa_eapol_key *key;
 	struct wpa_eapol_ie_parse kde;
 	int vlan_id = 0;
+	unsigned char *encoded; // Added for Skon
+	size_t encoded_len;
+
 	int owe_ptk_workaround = !!wpa_auth->conf.owe_ptk_workaround;
 	u8 pmk_r0[PMK_LEN_MAX], pmk_r0_name[WPA_PMK_NAME_LEN];
 	u8 pmk_r1[PMK_LEN_MAX];
@@ -3797,7 +3830,38 @@ SM_STATE(WPA_PTK, PTKCALCNEGOTIATING)
 			wpa_auth_psk_failure_report(sm->wpa_auth, sm->addr);
 		goto out;
 	}
+	printf("Skon Found Key! VLAN: %d\n",vlan_id);
+	//skon_printf("Skon Found PMK:",pmk,pmk_len);
+	encoded = base64_encode(pmk, pmk_len,
+				&encoded_len);
+	encoded[strlen(encoded)-1] = '\0';
+	//printf("PMK: %s\n",encoded);
+	//skon_printf("MAC",sm->addr,6);
+	//printf("Log file: /n",sm->wpa_auth->conf.connection_log_file);
+	time_t mytime = time(NULL);
+	char * time_str = ctime(&mytime);
+	time_str[strlen(time_str)-1] = '\0';
 
+	// Skon output connection log
+	char filename[]="/tmp/connections.log";
+	FILE *f;
+
+	// Skon send the vid to the vlan bridge
+//#ifdef CONFIG_VLAN_BRIDGE	
+	// Send vid to bridge
+	//wpa_send_vid(sm->addr,vlan_id);
+//#endif
+	
+	f = fopen(filename, "a");
+	fprintf(f,"{\"event\":\"assoc\",\"time\":\"%s\",\"mac\":\"",time_str);
+	for (int i = 0; i < 6; ++i) {
+	  fprintf(f,"%02X", ((unsigned char*)sm->addr[i]));
+	  if (i<5)
+	    fprintf(f,":");
+	}
+	fprintf(f,"\",\"pmk\":\"%s\",\"vid\":%d}\n",encoded,vlan_id);
+	fclose(f);
+	os_free(encoded);
 	/*
 	 * Note: last_rx_eapol_key length fields have already been validated in
 	 * wpa_receive().

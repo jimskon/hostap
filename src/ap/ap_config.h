@@ -70,6 +70,11 @@ struct mac_acl_entry {
 	struct vlan_description vlan_id;
 };
 
+struct mdk_acl_entry {
+	char mdk[45];
+	struct vlan_description vlan_id;
+};
+
 struct hostapd_radius_servers;
 struct ft_remote_r0kh;
 struct ft_remote_r1kh;
@@ -112,6 +117,8 @@ struct hostapd_ssid {
 	char *wpa_passphrase;
 	char *wpa_psk_file;
 	struct sae_pt *pt;
+	
+	char *connection_log_file;  // Skon
 
 #ifdef CONFIG_WEP
 	struct hostapd_wep_keys wep;
@@ -164,6 +171,7 @@ struct hostapd_sta_wpa_psk_short {
 struct hostapd_wpa_psk {
 	struct hostapd_wpa_psk *next;
 	int group;
+	int type;  // Skon type=0 psk, type=1 pmk.
 	char keyid[KEYID_LEN];
 	int wps;
 	u8 psk[PMK_LEN];
@@ -346,6 +354,8 @@ struct hostapd_bss_config {
 	enum macaddr_acl macaddr_acl;
 	struct mac_acl_entry *accept_mac;
 	int num_accept_mac;
+	struct mdk_acl_entry *accept_mdk;
+	int num_accept_mdk;
 	struct mac_acl_entry *deny_mac;
 	int num_deny_mac;
 	int wds_sta;

@@ -23,6 +23,7 @@
 #include "sta_info.h"
 #include "airtime_policy.h"
 #include "ap_config.h"
+#include "utils/base64.h"
 
 
 static void hostapd_config_free_vlan(struct hostapd_bss_config *bss)
@@ -327,6 +328,7 @@ static int hostapd_config_read_wpa_psk(const char *fname,
 	char *token;
 	char *name;
 	char *value;
+	char pmk[45];
 	int line = 0, ret = 0, len, ok;
 	u8 addr[ETH_ALEN];
 	struct hostapd_wpa_psk *psk;
@@ -361,6 +363,7 @@ static int hostapd_config_read_wpa_psk(const char *fname,
 
 		context = NULL;
 		keyid = NULL;
+		pmk[0]='\0';  // Skon start with empty PMK
 		while ((token = str_token(buf, " ", &context))) {
 			if (!os_strchr(token, '='))
 				break;
@@ -377,6 +380,10 @@ static int hostapd_config_read_wpa_psk(const char *fname,
 				wps = atoi(value);
 			} else if (!os_strcmp(name, "vlanid")) {
 				vlan_id = atoi(value);
+				//printf("Skon VID: %d\n",vlan_id);
+			} else if (!os_strcmp(name, "pmk")) {
+			   os_memcpy(pmk, value, 45);
+			  
 			} else {
 				wpa_printf(MSG_ERROR,
 					   "Unrecognized '%s=%s' on line %d in '%s'",
@@ -405,52 +412,86 @@ static int hostapd_config_read_wpa_psk(const char *fname,
 			ret = -1;
 			break;
 		}
-		psk->vlan_id = vlan_id;
-		if (is_zero_ether_addr(addr))
-			psk->group = 1;
-		else
-			os_memcpy(psk->addr, addr, ETH_ALEN);
+		//printf("PMK:%s\n",pmk);
+		// If the pmk is empty then use the normal psk processing
+		if (pmk[0] == '\0') {
+		  if (!token)
+		    token = "";
+		  if (hwaddr_aton(token, addr)) {
+		    wpa_printf(MSG_ERROR, "Invalid MAC address '%s' on "
+			       "line %d in '%s'", token, line, fname);
+		    ret = -1;
+		    break;
+		  }
+		  
+		  psk->type=0;
+		  psk->vlan_id = vlan_id;
+		  if (is_zero_ether_addr(addr))
+		    psk->group = 1;
+		  else
+		    os_memcpy(psk->addr, addr, ETH_ALEN);
+		  
+		  pos = str_token(buf, "", &context);
+		  if (!pos) {
+		    wpa_printf(MSG_ERROR, "No PSK on line %d in '%s'",
+			       line, fname);
+		    os_free(psk);
+		    ret = -1;
+		    break;
+		  }
+		  
+		  ok = 0;
+		  len = os_strlen(pos);
+		  if (len == 64 && hexstr2bin(pos, psk->psk, PMK_LEN) == 0)
+		    ok = 1;
+		  else if (len >= 8 && len < 64) {
+		    pbkdf2_sha1(pos, ssid->ssid, ssid->ssid_len,
+				4096, psk->psk, PMK_LEN);
+		    ok = 1;
+		  }
+		  if (!ok) {
+		    wpa_printf(MSG_ERROR, "Invalid PSK '%s' on line %d in "
+			       "'%s'", pos, line, fname);
+		    os_free(psk);
+		    ret = -1;
+		    break;
+		  }
+		  
+		  if (keyid) {
+		    len = os_strlcpy(psk->keyid, keyid, sizeof(psk->keyid));
+		    if ((size_t) len >= sizeof(psk->keyid)) {
+		      wpa_printf(MSG_ERROR,
+				 "PSK keyid too long on line %d in '%s'",
+				 line, fname);
+		      os_free(psk);
+		      ret = -1;
+		      break;
+		    }
+		  }
+		  //printf("Skon PSK added: vlan: %d\n",psk->vlan_id);
+		  //skon_printf("Skon PMK",psk->psk,PMK_LEN);
+		  //skon_printf("MAC",addr,6);
+		} else {
+		  // Skon use a PMK
+		  int pmk_len = strlen(pmk);
+		  if (pmk_len != 44) {
+		    wpa_printf(MSG_ERROR, "PMK invalid length, must be 44 charaters on line %d in '%s'",line,fname);
+		    return -1;
+		    break;
+		  }
 
-		pos = str_token(buf, "", &context);
-		if (!pos) {
-			wpa_printf(MSG_ERROR, "No PSK on line %d in '%s'",
-				   line, fname);
-			os_free(psk);
-			ret = -1;
-			break;
+		  psk->type=1;
+		  unsigned char *pmkbinary;
+		  int pmkbinary_len;
+
+		  pmkbinary = base64_decode((unsigned char *) pmk, pmk_len, &pmkbinary_len);
+
+		  os_memcpy(psk->psk, pmkbinary, pmkbinary_len);
+
+		  psk->vlan_id = vlan_id;
+		  //printf("Skon PMK added: type:%d, vlan: %d\n",psk->type,psk->vlan_id);
+		  //skon_printf("Skon PMK",psk->psk,pmkbinary_len);
 		}
-
-		ok = 0;
-		len = os_strlen(pos);
-		if (len == 2 * PMK_LEN &&
-		    hexstr2bin(pos, psk->psk, PMK_LEN) == 0)
-			ok = 1;
-		else if (len >= 8 && len < 64 &&
-			 pbkdf2_sha1(pos, ssid->ssid, ssid->ssid_len,
-				     4096, psk->psk, PMK_LEN) == 0)
-			ok = 1;
-		if (!ok) {
-			wpa_printf(MSG_ERROR,
-				   "Invalid PSK '%s' on line %d in '%s'",
-				   pos, line, fname);
-			os_free(psk);
-			ret = -1;
-			break;
-		}
-
-		if (keyid) {
-			len = os_strlcpy(psk->keyid, keyid, sizeof(psk->keyid));
-			if ((size_t) len >= sizeof(psk->keyid)) {
-				wpa_printf(MSG_ERROR,
-					   "PSK keyid too long on line %d in '%s'",
-					   line, fname);
-				os_free(psk);
-				ret = -1;
-				break;
-			}
-		}
-
-		psk->wps = wps;
 
 		psk->next = ssid->wpa_psk;
 		ssid->wpa_psk = psk;
@@ -1173,7 +1214,8 @@ const u8 * hostapd_get_psk(const struct hostapd_bss_config *conf,
 
 	for (psk = conf->ssid.wpa_psk; psk != NULL; psk = psk->next) {
 		if (next_ok &&
-		    (psk->group ||
+		    (psk->group || 
+			 (psk->type == 1) ||
 		     (addr && ether_addr_equal(psk->addr, addr)) ||
 		     (!addr && p2p_dev_addr &&
 		      ether_addr_equal(psk->p2p_dev_addr, p2p_dev_addr)))) {
@@ -1595,7 +1637,7 @@ int hostapd_config_check(struct hostapd_config *conf, int full_config)
 		wpa_printf(MSG_ERROR, "Cannot set Spectrum Management bit without Country and Power Constraint elements");
 		return -1;
 	}
-
+	printf("Skon hostapd version 0.1 with PMK and local VLAN support\n");
 #ifdef CONFIG_AIRTIME_POLICY
 	if (full_config && conf->airtime_mode > AIRTIME_MODE_STATIC &&
 	    !conf->airtime_update_interval) {

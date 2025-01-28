@@ -602,7 +602,7 @@ static void show_version(void)
 		"IEEE 802.1X/WPA/WPA2/EAP/RADIUS Authenticator\n"
 		"Copyright (c) 2002-2024, Jouni Malinen <j@w1.fi> "
 		"and contributors\n"
-		"Updates by James Skon\n",,
+		"Updates by James Skon\n",
 		VERSION_STR);
 }
 
